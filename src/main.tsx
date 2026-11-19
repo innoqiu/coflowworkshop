@@ -102,7 +102,7 @@ function Consent({ onJoin }: { onJoin: (p: Participant) => void }) {
     <div className="entry">
       <main className="consent-grid">
         <section className="welcome">
-          <h1>{solo?"单人测试":"设计工作坊"}</h1>{!solo&&<a href="/solo">单人测试入口</a>}
+          <h1>{solo?"单人测试":"设计工作坊"}</h1>
           <Mascot large />
         </section>
         <section className="paper">
@@ -412,7 +412,7 @@ function Workshop({ person }: { person: Participant }) {
     <div className={"workshop stage-" + w.stage}>
       <header>
         {!inIntro&&<nav className="own-tabs" aria-label="实验画布"><strong>我的场景与批阅</strong><span>预设场景练习</span><span>解他人场景</span></nav>}
-        <div className="identity">{!solo?<a href="/solo">单人测试</a>:<><a href="/">返回正式工作坊</a><button className="restart-solo" onClick={async()=>{if(!confirm("重新开始会清除这次单人测试的全部卡片和批阅，确定继续吗？"))return;await api("/reset","POST");Object.keys(localStorage).filter(k=>k.startsWith("workshop-")).forEach(k=>localStorage.removeItem(k));location.href="/solo"}}>重新开始</button></>}
+        <div className="identity">{solo&&<><a href="/">返回正式工作坊</a><button className="restart-solo" onClick={async()=>{if(!confirm("重新开始会清除这次单人测试的全部卡片和批阅，确定继续吗？"))return;await api("/reset","POST");Object.keys(localStorage).filter(k=>k.startsWith("workshop-")).forEach(k=>localStorage.removeItem(k));location.href="/solo"}}>重新开始</button></>}
           <span>{person.id}</span>
           <span className={"save " + (status === "已保存" ? "saved" : "")}>
             {status === "已保存" ? "✓" : "○"} {status}
@@ -930,6 +930,37 @@ function CardForm({
     </form>
   );
 }
-createRoot(document.getElementById("root")!).render(<App />);
+const downloadFiles = [
+  ["workshop.json", "完整研究数据（JSON）", "画布、场景、方案与批阅的结构化数据"],
+  ["cards.csv", "原始卡片表（CSV）", "参与者创建的场景卡与困难卡"],
+  ["export_nodes_and_solutions.csv", "困难与解法表（CSV）", "按困难节点展开交互卡、AI 卡与评分"],
+  ["export_peer_scenarios.csv", "同事场景表（CSV）", "已发布的场景与困难节点"],
+  ["export_ai_cards_hotspot.csv", "AI 卡热点表（CSV）", "各困难节点的 AI 卡使用次数"],
+  ["workshop.sqlite", "完整数据库备份（SQLite）", "用于灾备恢复；包含测试数据与会话凭据哈希，请妥善保管"],
+] as const;
+function DownloadPage() {
+  const [token,setToken]=useState(""),[busy,setBusy]=useState(""),[message,setMessage]=useState("");
+  async function download(name:string){
+    setBusy(name);setMessage("");
+    try{
+      const response=await fetch("/api/export/"+encodeURIComponent(name),{method:"POST",headers:{"X-Export-Token":token}});
+      if(!response.ok){const data=await response.json().catch(()=>({}));throw Error(data.error||"下载失败");}
+      const blob=await response.blob(),url=URL.createObjectURL(blob),link=document.createElement("a");
+      link.href=url;
+      link.download=response.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/)?.[1]||name;
+      document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(url);
+      setMessage("文件已开始下载。请将备份保存到服务器之外的安全位置。");
+    }catch(error:any){setMessage(error.message||"下载失败");}
+    finally{setBusy("");}
+  }
+  return <main className="download-page">
+    <header><span className="label">RESEARCH ARCHIVE</span><h1>数据下载与备份</h1><p>研究导出会排除单人测试记录和会话凭据；完整数据库备份用于灾难恢复。</p></header>
+    <section className="download-auth paper"><label>下载密钥<input type="password" autoComplete="off" value={token} onChange={event=>setToken(event.target.value)} placeholder="输入服务器配置的 EXPORT_TOKEN" /></label><p>密钥只保留在本页面内存中，不写入浏览器存储。</p></section>
+    <section className="download-grid" aria-label="可下载文件">{downloadFiles.map(([name,title,description])=><article className={name.endsWith(".sqlite")?"paper backup-file":"paper"} key={name}><span className="label">{name.endsWith(".sqlite")?"RECOVERY BACKUP":"RESEARCH EXPORT"}</span><h2>{title}</h2><p>{description}</p><button className="primary" disabled={!token||Boolean(busy)} onClick={()=>download(name)}>{busy===name?"正在生成…":"下载"}</button></article>)}</section>
+    {message&&<p className="download-message" role="status">{message}</p>}
+  </main>;
+}
+const isDownload=location.pathname.replace(/\/$/,"")==="/download";
+createRoot(document.getElementById("root")!).render(isDownload?<DownloadPage/>:<App />);
 import "./cards.css";
 import "./canvas.css";

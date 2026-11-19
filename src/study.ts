@@ -25,6 +25,7 @@ export type Study = {
   preset: string;
   practice: Answer[];
   peer: Answer[];
+  peerModified: boolean;
   target: string;
   own: Scene | null;
   reviews: Record<string, Rating>;
@@ -118,6 +119,7 @@ export const initialStudy = (): Study => ({
   preset: "",
   practice: [],
   peer: [],
+  peerModified: false,
   target: "",
   own: null,
   reviews: {},

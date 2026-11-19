@@ -30,17 +30,21 @@ npm start
 
 SQLite 默认保存至 `data/workshop.sqlite`。身份存于 HttpOnly cookie，同一浏览器重新打开或服务重启后可恢复。清除 cookie 或更换设备不会恢复身份。
 
-每个参与者拥有独立画布。记录匿名 ID、签署时的说明与版本、阶段、卡片最新内容、坐标、层级和视图；不记录修改历史。新建输入草稿保留在本机，提交后写入服务器；有效的已创建卡片编辑在停止输入后自动同步，拖动结束立即保存。
+每个参与者拥有独立画布。记录匿名 ID、签署时的说明与版本、阶段、卡片内容、坐标、层级和视图。服务器会在 `workspace_history` 与 `study_history` 中追加每次有效修订，当前状态仍保存在主表中以便快速恢复；升级旧数据库时会自动把当时的当前状态补为历史基线。新建输入草稿保留在本机，提交后写入服务器；有效的已创建卡片编辑在停止输入后自动同步，拖动结束立即保存。
 
 断网时保留待同步草稿，联网后重试。多标签页版本冲突会暂停覆盖，允许下载本页草稿后加载最新数据。单工作区最多 100 张卡片，每字段最多 5000 字。逻辑画布 2000×1400，卡片 260×300，窗口尺寸不改变卡片坐标。
 
-没有网页管理端。研究者在服务器上运行导出脚本即可获得 JSON 和 CSV：
+研究者可以在服务器上运行只读导出脚本获得 JSON 和 CSV：
 
 ```powershell
 node scripts/export.mjs data exports
 ```
 
-第一个参数为数据库目录，第二个为输出目录；均可省略。脚本只读数据库，不包含会话 token。JSON 保留完整布局与同意快照；CSV 每行一张卡片。两个格式均包含最新已保存的未完成草稿，可以按阶段筛选完成作品。研究数据目录和导出结果均不提交 Git。
+第一个参数为数据库目录，第二个为输出目录；均可省略。脚本只读数据库，不包含会话 token，并自动排除 `/solo` 产生的 `TEST-` 会话。JSON 保留完整布局、解法、批阅与同意快照；CSV 可按卡片或困难节点分析。研究数据目录和导出结果均不提交 Git。
+
+另有不在参与者界面显示的 `/download` 下载页。部署时设置至少 24 字符的 `EXPORT_TOKEN`，研究者在该页输入密钥后可以下载上述研究文件，或生成一致性的完整 SQLite 灾备快照。密钥只保留在页面内存中；未配置时服务端会关闭下载接口。完整 SQLite 备份包含测试会话及会话凭据哈希，必须保存在受控位置，不能作为普通研究数据分享。
+
+单人测试入口同样不在正式界面显示，仅可直接访问 `/solo`；它使用独立 cookie，且不会进入研究导出。
 
 当前本机预览使用独立目录 `data/preview`，对应导出命令为 `node scripts/export.mjs data/preview exports`。
 
@@ -58,14 +62,15 @@ node scripts/export.mjs data exports
 | Domain | 你的 HTTPS 域名 |
 | Persistent Volume Destination | `/app/data` |
 | 实例数 | `1` |
+| 环境变量 | `EXPORT_TOKEN=<至少 24 字符的随机密钥>` |
 
-无需配置管理口令。镜像设置 `PORT=3000`、`DATA_DIR=/app/data`、`NODE_ENV=production`，以非 root 用户运行。生产使用 Secure cookie，需要 HTTPS。若项目在已有仓库子目录内，调整 Base Directory。
+镜像设置 `PORT=3000`、`DATA_DIR=/app/data`、`NODE_ENV=production`，以非 root 用户运行。请在 Coolify 环境变量中另外设置强随机 `EXPORT_TOKEN`，不要写入仓库。生产使用 Secure cookie，需要 HTTPS。若项目在已有仓库子目录内，调整 Base Directory。
 
-单实例 SQLite 支持本轮 4–6 人并发；不要将同一个数据库文件共享给多个应用副本。先配置持久卷再招募，避免重新部署丢失数据。持久卷不是备份，活动前后导出并备份到服务器以外的位置。做 SQLite 文件备份时停止应用，保留数据库及 WAL 的一致性。
+单实例 SQLite 使用 WAL、写入等待和乐观版本检查，支持本轮 4–6 人并发；不要将同一个数据库文件共享给多个应用副本。先配置持久卷再招募，避免重新部署丢失数据。持久卷不是备份，活动前后从 `/download` 下载完整 SQLite 快照，并复制到服务器之外。下载接口通过 SQLite `VACUUM INTO` 生成包含 WAL 已提交内容的一致快照，无需直接复制正在运行的数据库文件。
 
 容器内导出：`docker exec <容器名> node scripts/export.mjs /app/data /app/data/export`，再用 `docker cp` 取出导出目录。
 
-官方参考：[Dockerfile 部署](https://coolify.io/docs/applications/builds/dockerfile)、[持久存储](https://coolify.io/docs/core/persistent-storage/storage-mounts/overview)。本项目尚未绑定实际 GitHub 远端与 Coolify 域名。
+官方参考：[Dockerfile 部署](https://coolify.io/docs/applications/builds/dockerfile)、[持久存储](https://coolify.io/docs/core/persistent-storage/storage-mounts/overview)。
 
 ## 验证
 
@@ -77,7 +82,7 @@ docker build -t codesign-workshop:local .
 node tests/docker.mjs
 ```
 
-API 测试使用 3101 端口和临时数据库，验证无需主持配置、同意门槛、六人并发、隔离、冲突、导出与重启恢复。浏览器测试使用本机 Chrome，在 3102 端口完整验证创作、翻面、拖动、困难箱、真实过渡中间状态、鼠标/键盘/触屏、离线恢复和桌面/平板/手机布局。可设置 `TEST_BROWSER_CHANNEL=msedge` 切换 Edge。临时数据库在测试结束后清理，截图输出到被 Git 忽略的 `test-results/`。
+API 测试使用 3101 端口和临时数据库，验证同意门槛、六人并发、隔离、冲突、研究导出、完整备份可恢复与重启恢复。浏览器测试使用本机 Chrome，在 3102 端口完整验证创作、交叉解题、多份方案选择与逐份批阅、隐藏入口、下载页、离线恢复和响应式布局。可设置 `TEST_BROWSER_CHANNEL=msedge` 切换 Edge。临时数据库在测试结束后清理，截图输出到被 Git 忽略的 `test-results/`。
 
 Docker 测试验证生产 cookie、非 root 用户、健康检查、导出脚本，以及容器替换后的持久卷恢复。
 
@@ -85,8 +90,8 @@ Docker 测试验证生产 cookie、非 root 用户、健康检查、导出脚本
 
 ## 多阶段实验
 
-同场参与者使用同一个链接，例如 `/?session=workshop-A`。每次实验使用新的 session 值，参与者使用各自的浏览器会话。省略 session 时按 UTC 日期分组。正式实验链接只发给实际参试者。所有加入同组的参与者定稿后，服务端以环形分配题目，每人解一题并收到一份答卷。若有人中途退出且尚未发布，其他人会停在等待页。
+同场参与者使用同一个链接，例如 `/?session=workshop-A`。每次实验使用新的 session 值，参与者使用各自的浏览器会话。省略 session 时按 UTC 日期分组。正式实验链接只发给实际参试者。参与者发布场景后，其他同组参与者可从场景库自由选择；同一场景允许收到多份解法，出题人先在方案列表查看提交者、修改状态和节点概览，再逐份进入批阅。
 
-自主场景至少包含四个困难。材料卡通过下拉框绑定到困难，旧版无绑定的材料按最近的困难位置归属。困难按画布上从上到下、同一行从左到右的顺序进入三轨视图。预设练习 AI 配额为三张，交叉解题为两张。交互与 AI 轨合计至少一张即可覆盖节点。评分采用三级，每个节点须有评语，可勾选采纳的卡片。修改在各解法卡或批阅表单点击保存时提交。
+自主场景至少包含四个困难，困难沿时间线从左到右排列并进入三轨视图。预设练习 AI 配额为三张，交叉解题为两张。交互与 AI 轨合计至少一张即可覆盖节点，同一交互卡可以放入多个节点，AI 卡只能属于一个节点。每个返回方案的每个节点均采用 0–100 分评分并填写评语，可勾选采纳的卡片。编辑过已有解法卡的方案会在返回列表标记为“经历过修改”。
 
 研究导出命令现在额外生成 `export_nodes_and_solutions.csv`、`export_ai_cards_hotspot.csv` 和 `export_peer_scenarios.csv`。JSON 中 studies 包含阶段、两套解法、已发布快照以及批阅。热点表按场景与困难节点统计已提交的 AI 卡数量。

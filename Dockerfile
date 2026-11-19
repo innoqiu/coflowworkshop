@@ -10,7 +10,7 @@ ENV NODE_ENV=production PORT=3000 DATA_DIR=/app/data
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json server.ts study-server.ts ./
-COPY src/types.ts src/study.ts ./src/
+COPY src/types.ts src/study.ts src/export-data.ts ./src/
 COPY scripts/export.mjs ./scripts/export.mjs
 RUN mkdir -p /app/data && chown -R node:node /app
 USER node

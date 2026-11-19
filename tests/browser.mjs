@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 const testDir = mkdtempSync(path.join(os.tmpdir(), "workshop-browser-"));
+const exportToken = "browser-export-token-with-more-than-24-characters";
 const server = process.env.TEST_URL
   ? null
   : spawn(process.execPath, ["--experimental-strip-types", "server.ts"], {
@@ -13,6 +14,7 @@ const server = process.env.TEST_URL
         PORT: "3102",
         DATA_DIR: testDir,
         NODE_ENV: "test",
+        EXPORT_TOKEN: exportToken,
       },
       stdio: "pipe",
     });
@@ -36,6 +38,19 @@ const errors = [];
 page.on("pageerror", (e) => errors.push(e.message));
 mkdirSync("test-results", { recursive: true });
 try {
+  await page.goto(base+"/");
+  assert.equal(await page.locator('a[href="/solo"]').count(),0);
+  await page.goto(base+"/download");
+  await page.getByRole('heading',{name:'数据下载与备份'}).waitFor();
+  assert.equal(await page.locator('a[href="/solo"]').count(),0);
+  await page.getByLabel('下载密钥').fill('wrong-token-with-more-than-24-characters');
+  await page.locator('article').filter({hasText:'完整研究数据'}).getByRole('button',{name:'下载'}).click();
+  await page.getByRole('status').filter({hasText:'下载密钥不正确'}).waitFor();
+  await page.getByLabel('下载密钥').fill(exportToken);
+  const downloadPromise=page.waitForEvent('download');
+  await page.locator('article').filter({hasText:'完整研究数据'}).getByRole('button',{name:'下载'}).click();
+  const researchDownload=await downloadPromise;
+  assert.equal(researchDownload.suggestedFilename(),'workshop.json');
   await page.goto(base+"/solo");
   await page.screenshot({ path: "test-results/consent-desktop.png" });
   await page.getByRole("checkbox").check();
@@ -264,9 +279,20 @@ try {
     await page.locator('.study-editor').waitFor({state:'hidden'});
     await page.getByRole('button',{name:'完成当前节点'}).click();
   }
-  await page.getByRole('button',{name:'提交解法'}).click();await page.locator('.study-node form').first().waitFor();await page.getByText(/这是一份单人测试示例提交/).first().waitFor();
-  for(const form of await page.locator('.study-node form').all()){await form.locator('input[type=number]').fill('88');await form.locator('textarea').fill('能够解决这个问题');await form.getByText('保存批阅').click();await form.getByText('更新批阅').waitFor();}
-  await page.getByRole('button',{name:'完成批阅'}).click();await page.getByText('实验已完成').waitFor();
+  await page.getByRole('button',{name:'提交解法'}).click();
+  await page.locator('.submission-card').first().waitFor();
+  assert.equal(await page.locator('.submission-card').count(),2);
+  assert.equal(await page.locator('.submission-card .modified').count(),1);
+  assert.equal(await page.locator('.submission-card .original').count(),1);
+  for(let submission=0;submission<2;submission++){
+    await page.locator('.submission-card').nth(submission).getByRole('button',{name:'查看并批阅'}).click();
+    await page.locator('.study-node form').first().waitFor();
+    await page.getByText(/这是一份单人测试示例提交/).first().waitFor();
+    for(const form of await page.locator('.study-node form').all()){await form.locator('input[type=number]').fill(String(88-submission));await form.locator('textarea').fill('能够解决这个问题');await form.getByText('保存批阅').click();await form.getByText('更新批阅').waitFor();}
+    await page.getByRole('button',{name:'返回方案列表'}).click();
+    await page.locator('.submission-card').first().waitFor();
+  }
+  await page.getByRole('button',{name:'完成全部批阅'}).click();await page.getByText('实验已完成').waitFor();
   assert.equal((await page.request.get(base+'/api/me')).status(),401);
   page.once('dialog',dialog=>dialog.accept());
   await page.getByRole('button',{name:'重新开始',exact:true}).click();

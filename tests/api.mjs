@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 const dir = mkdtempSync(path.join(os.tmpdir(), "codesign-test-")),
   port = 3101,
-  base = `http://127.0.0.1:${port}`;
+  base = `http://127.0.0.1:${port}`,
+  exportToken = "test-export-token-with-more-than-24-characters";
 let child;
 function start() {
   child = spawn(process.execPath, ["--experimental-strip-types", "server.ts"], {
@@ -14,6 +16,7 @@ function start() {
       PORT: String(port),
       DATA_DIR: dir,
       NODE_ENV: "test",
+      EXPORT_TOKEN: exportToken,
     },
     stdio: "pipe",
   });
@@ -62,6 +65,7 @@ try {
   await ready();
   assert.equal((await req("/api/me")).status, 401);
   assert.equal((await req("/api/admin/participants")).status, 404);
+  assert.equal((await req("/api/export/workshop.json", "POST")).status, 401);
   const consent = (await req("/api/consent")).data;
   assert(!consent.text.includes("待核定"));
   assert(!consent.text.includes("请研究负责人补充"));
@@ -155,6 +159,8 @@ try {
     readFileSync(path.join(dir, "export/workshop.json"), "utf8"),
   );
   assert.equal(exported.participants.length, 6);
+  assert.equal(exported.history.workspaces.length, 12);
+  assert.equal(exported.history.studies.length, 6);
   assert(!JSON.stringify(exported).includes("token"));
   assert.equal(
     readFileSync(path.join(dir, "export/cards.csv"), "utf8").split("\r\n")
@@ -176,11 +182,51 @@ try {
   for(const p of people){const w=(await req('/api/me','GET',undefined,p.cookie)).data.workspace;w.cards.push(...[1,2,3].map(i=>card('困难卡','extra'+i,150*i)));await req('/api/workspace','PUT',w,p.cookie);await act(p,'choose',{id:'health'});await act(p,'submit',{answers:[1,2,3,4].map(i=>answer({id:'health-'+i}))});}
   for(const p of people)await act(p,'publish');
   const assigned=new Set();
-  for(let i=0;i<people.length;i++){const p=people[i];const {library}=await getStudy(p);const picked=library.find(scene=>scene.id===people[(i+1)%people.length].data.id);assert(picked&&picked.id!==p.data.id);await act(p,'select',{id:picked.id});const {target}=await getStudy(p);assert.equal(target.id,picked.id);assigned.add(target.id);const shared={id:'shared-'+p.data.id,node:target.nodes[0].id,nodes:target.nodes.map(n=>n.id),kind:'交互',text:'长按圈选并确认材料用途',io:'从文档中建立选区',links:[]};await act(p,'submit',{answers:[shared]});}
+  for(let i=0;i<people.length;i++){const p=people[i];const {library}=await getStudy(p);const picked=library.find(scene=>scene.id===people[(i+1)%people.length].data.id);assert(picked&&picked.id!==p.data.id);await act(p,'select',{id:picked.id});const {target}=await getStudy(p);assert.equal(target.id,picked.id);assigned.add(target.id);const shared={id:'shared-'+p.data.id,node:target.nodes[0].id,nodes:target.nodes.map(n=>n.id),kind:'交互',text:'长按圈选并确认材料用途',io:'从文档中建立选区',links:[]};await act(p,'answers',{answers:[shared]});await act(p,'submit',{answers:[{...shared,text:'长按圈选、预览并确认材料用途'}],modified:i===0});}
   assert.equal(assigned.size,6);
-  for(const p of people){const {incoming,own}=await getStudy(p);assert.equal(incoming.length,1);const shared=incoming[0].answers[0].id;const reviews=Object.fromEntries(own.nodes.map(n=>[incoming[0].id+'/'+n.id,{score:88,comment:'操作能解决这一困难',accepted:[shared]}]));assert.equal((await act(p,'complete',{reviews})).s.step,6);}
+  for(const p of people){const {incoming,own}=await getStudy(p);assert.equal(incoming.length,1);const shared=incoming[0].answers[0].id;const reviews=Object.fromEntries(own.nodes.map(n=>[incoming[0].id+'/'+n.id,{score:0,comment:'操作能解决这一困难',accepted:[shared]}]));assert.equal((await act(p,'complete',{reviews})).s.step,6);}
+  await stop();
+  start();
+  await ready();
+  assert.equal((await getStudy(people[0])).s.step,6);
+  assert.equal((await getStudy(people[0])).s.reviews[people[5].data.id+'/d'].score,0);
+  const authorized=await fetch(base+'/api/export/workshop.json',{method:'POST',headers:{'X-Export-Token':exportToken}});
+  assert.equal(authorized.status,200);
+  const research=await authorized.json();
+  assert.equal(research.participants.length,6);
+  assert.equal(Object.keys(research.studies).length,6);
+  assert(research.history.workspaces.length>=12);
+  assert(research.history.studies.length>=42);
+  for(const participant of research.participants){
+    const revisions=research.history.workspaces.filter(item=>item.participantId===participant.id).map(item=>item.revision);
+    assert.equal(Math.max(...revisions),participant.workspace.revision);
+  }
+  for(const [id,study] of Object.entries(research.studies)){
+    const revisions=research.history.studies.filter(item=>item.participantId===id).map(item=>item.revision);
+    assert.equal(Math.max(...revisions),study.revision);
+  }
+  assert(!JSON.stringify(research).includes('token'));
+  const solutions=await fetch(base+'/api/export/export_nodes_and_solutions.csv',{method:'POST',headers:{'X-Export-Token':exportToken}}).then(response=>response.text());
+  assert.equal(solutions.split('\r\n').length,49);
+  assert.equal(solutions.split('\r\n').filter(line=>line.includes('shared-')).length,24);
+  assert(solutions.includes('"0"'));
+  assert(solutions.includes('"是"'));
+  const backupResponse=await fetch(base+'/api/export/workshop.sqlite',{method:'POST',headers:{'X-Export-Token':exportToken}});
+  assert.equal(backupResponse.status,200);
+  const backupPath=path.join(dir,'downloaded-backup.sqlite');
+  writeFileSync(backupPath,Buffer.from(await backupResponse.arrayBuffer()));
+  assert.equal(readFileSync(backupPath).subarray(0,15).toString(),'SQLite format 3');
+  const backupDb=new DatabaseSync(backupPath,{readOnly:true});
+  assert.equal(backupDb.prepare('SELECT count(*) AS count FROM participants').get().count,6);
+  assert.equal(backupDb.prepare('SELECT count(*) AS count FROM study WHERE json_extract(data,\'$.step\')=6').get().count,6);
+  assert(backupDb.prepare('SELECT count(*) AS count FROM workspace_history').get().count>=12);
+  assert(backupDb.prepare('SELECT count(*) AS count FROM study_history').get().count>=42);
+  assert.equal(backupDb.prepare("SELECT count(*) AS count FROM participants p WHERE (SELECT max(revision) FROM workspace_history h WHERE h.participant_id=p.id) != json_extract(p.workspace,'$.revision')").get().count,0);
+  assert.equal(backupDb.prepare("SELECT count(*) AS count FROM study s WHERE (SELECT max(revision) FROM study_history h WHERE h.participant_id=s.id) != json_extract(s.data,'$.revision')").get().count,0);
+  assert.equal(backupDb.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+  backupDb.close();
   console.log(
-    "PASS: direct entry without host configuration, consent, six concurrent participants, five card types, isolation, validation, conflicts, CLI export and persistent restart.",
+    "PASS: six concurrent participants, revision logs, restart persistence, complete research exports, zero-value ratings and restorable SQLite snapshot.",
   );
 } finally {
   await stop();

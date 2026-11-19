@@ -1,9 +1,10 @@
 import {initialStudy} from './src/study.ts';
+import {buildExportFiles} from './src/export-data.ts';
 import {installStudy} from './study-server.ts';
 import express from "express";
 import { DatabaseSync } from "node:sqlite";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { kinds } from "./src/types.ts";
 import type { Workspace } from "./src/types.ts";
@@ -11,11 +12,13 @@ const app = express(),
   dir = process.env.DATA_DIR || "data";
 mkdirSync(dir, { recursive: true });
 const db = new DatabaseSync(path.join(dir, "workshop.sqlite"));
-db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS config(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER,text TEXT,published INTEGER);
 INSERT OR IGNORE INTO config VALUES(1,1,'【待核定模板】\n本工作坊收集您自愿填写的卡片内容与最终排布，用于研究 AI 使用困难和交互设计。参与是自愿的，您可以随时停止。\n请研究负责人补充：研究机构、负责人及联系方式、数据用途、保存期限、撤回方式与适用的审批信息。',0);
 CREATE TABLE IF NOT EXISTS participants(id TEXT PRIMARY KEY,token TEXT UNIQUE,created TEXT,consent_version INTEGER,consent_text TEXT,workspace TEXT);
+CREATE TABLE IF NOT EXISTS workspace_history(participant_id TEXT NOT NULL,revision INTEGER NOT NULL,saved TEXT NOT NULL,workspace TEXT NOT NULL,PRIMARY KEY(participant_id,revision));
 `);
+db.exec("INSERT OR IGNORE INTO workspace_history SELECT id,CAST(json_extract(workspace,'$.revision') AS INTEGER),created,workspace FROM participants");
 const defaultConsent =
   "本工作坊邀请您构想日常使用 AI 的场景与困难。参与完全自愿，您可以随时停止。\n\n应用自动分配匿名参与者 ID，并记录您创建的卡片内容与最终排布，用于本次工作坊的讨论与研究分析。定稿的场景会分配给同场参与者解题，解法将返回给出题人评分和批阅。请勿填写姓名、联系方式等个人敏感信息。\n\n如有疑问或希望撤回参与，请联系现场主持人。勾选下方选项表示您已阅读以上说明，并自愿参与。";
 const currentConsent = db
@@ -48,6 +51,7 @@ app.use((req, res, next) => {
   next();
 });
 const hash = (s: string) => createHash("sha256").update(s).digest("hex");
+const exportToken = process.env.EXPORT_TOKEN || "";
 const cookie = (req: express.Request, name: string) => {
   const raw = req.headers.cookie
     ?.split(";")
@@ -107,17 +111,20 @@ app.post("/api/join", (req, res) => {
     view: { x: 0, y: 0, scale: 1 },
     revision: 0,
   };
-  db.prepare("INSERT INTO participants VALUES(?,?,?,?,?,?)").run(
-    id,
-    hash(token),
-    new Date().toISOString(),
-    c.version,
-    c.text,
-    JSON.stringify(w),
-  );
   const room=soloRequest(req)?id:"session:"+String(req.body.room||new Date().toISOString().slice(0,10)).slice(0,100);
-  db.prepare('INSERT INTO study_group VALUES(?,?)').run(id,room);
-  db.prepare('INSERT INTO study VALUES(?,?)').run(id,JSON.stringify(initialStudy()));
+  const created=new Date().toISOString(),workspace=JSON.stringify(w),study=JSON.stringify(initialStudy());
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("INSERT INTO participants VALUES(?,?,?,?,?,?)").run(id,hash(token),created,c.version,c.text,workspace);
+    db.prepare('INSERT INTO workspace_history VALUES(?,?,?,?)').run(id,w.revision,created,workspace);
+    db.prepare('INSERT INTO study_group VALUES(?,?)').run(id,room);
+    db.prepare('INSERT INTO study VALUES(?,?)').run(id,study);
+    db.prepare('INSERT INTO study_history VALUES(?,?,?,?)').run(id,0,created,study);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
   setCookie(res, sessionCookie(req), token, 365 * 86400000);
   res.json(publicParticipant(db.prepare("SELECT * FROM participants WHERE id=?").get(id)));
 });
@@ -139,7 +146,9 @@ app.post("/api/reset", (req, res) => {
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare("DELETE FROM study WHERE id=?").run(p.id);
+      db.prepare("DELETE FROM study_history WHERE participant_id=?").run(p.id);
       db.prepare("DELETE FROM study_group WHERE id=?").run(p.id);
+      db.prepare("DELETE FROM workspace_history WHERE participant_id=?").run(p.id);
       db.prepare("DELETE FROM participants WHERE id=?").run(p.id);
       db.exec("COMMIT");
     } catch (error) {
@@ -210,14 +219,72 @@ app.put("/api/workspace", (req, res) => {
     return;
   }
   const updated = { ...w, revision: w.revision + 1 };
-  const result = db
-    .prepare("UPDATE participants SET workspace=? WHERE id=? AND workspace=?")
-    .run(JSON.stringify(updated), p.id, p.workspace);
-  if (!result.changes) {
-    res.status(409).json({ error: "版本冲突，请加载最新版本" });
-    return;
+  const serialized=JSON.stringify(updated);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = db.prepare("UPDATE participants SET workspace=? WHERE id=? AND workspace=?").run(serialized,p.id,p.workspace);
+    if (!result.changes) {
+      db.exec("ROLLBACK");
+      res.status(409).json({ error: "版本冲突，请加载最新版本" });
+      return;
+    }
+    db.prepare("INSERT INTO workspace_history VALUES(?,?,?,?)").run(p.id,updated.revision,new Date().toISOString(),serialized);
+    db.exec("COMMIT");
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    throw error;
   }
   res.json(updated);
+});
+const exportNames = new Set([
+  "workshop.json",
+  "cards.csv",
+  "export_nodes_and_solutions.csv",
+  "export_peer_scenarios.csv",
+  "export_ai_cards_hotspot.csv",
+  "workshop.sqlite",
+]);
+app.post("/api/export/:name", (req, res, next) => {
+  if (exportToken.length < 24) {
+    res.status(503).json({ error: "下载功能尚未配置" });
+    return;
+  }
+  const supplied = String(req.headers["x-export-token"] || "");
+  if (!supplied || hash(supplied) !== hash(exportToken)) {
+    res.status(401).json({ error: "下载密钥不正确" });
+    return;
+  }
+  const name = req.params.name;
+  if (!exportNames.has(name)) {
+    res.status(404).json({ error: "导出文件不存在" });
+    return;
+  }
+  if (name === "workshop.sqlite") {
+    const snapshot = path.join(dir, `backup-${randomUUID()}.sqlite`);
+    try {
+      db.prepare("VACUUM INTO ?").run(path.resolve(snapshot));
+      const date = new Date().toISOString().slice(0, 10);
+      res.download(snapshot, `workshop-backup-${date}.sqlite`, (error) => {
+        try { unlinkSync(snapshot); } catch {}
+        if (error && !res.headersSent) next(error);
+      });
+    } catch (error) {
+      try { unlinkSync(snapshot); } catch {}
+      next(error);
+    }
+    return;
+  }
+  try {
+    db.exec("BEGIN");
+    const content = buildExportFiles(db).files[name];
+    db.exec("COMMIT");
+    res.type(name.endsWith(".json") ? "application/json" : "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
+    res.send(content);
+  } catch (error) {
+    try { db.exec("ROLLBACK"); } catch {}
+    next(error);
+  }
 });
 installStudy(app,db,participant);
 app.use("/api", (_req, res) => res.status(404).json({ error: "接口不存在" }));

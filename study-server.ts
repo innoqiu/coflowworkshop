@@ -13,6 +13,12 @@ export function installStudy(
   db.exec(
     "CREATE TABLE IF NOT EXISTS study_group(id TEXT PRIMARY KEY,room TEXT NOT NULL)",
   );
+  db.exec(
+    "CREATE TABLE IF NOT EXISTS study_history(participant_id TEXT NOT NULL,revision INTEGER NOT NULL,saved TEXT NOT NULL,data TEXT NOT NULL,PRIMARY KEY(participant_id,revision))",
+  );
+  db.exec(
+    "INSERT OR IGNORE INTO study_history SELECT id,CAST(json_extract(data,'$.revision') AS INTEGER),datetime('now'),data FROM study",
+  );
   const all = (room: string) =>
     db
       .prepare(
@@ -23,12 +29,11 @@ export function installStudy(
         id: String(r.id),
         s: JSON.parse(String(r.data)) as Study,
       }));
-  const put = (id: string, s: Study) =>
-    db
-      .prepare(
-        "INSERT INTO study VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-      )
-      .run(id, JSON.stringify(s));
+  const put = (id: string, s: Study) => {
+    const data=JSON.stringify(s);
+    db.prepare("INSERT INTO study VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data").run(id,data);
+    db.prepare("INSERT OR IGNORE INTO study_history VALUES(?,?,?,?)").run(id,s.revision,new Date().toISOString(),data);
+  };
   const check = (ok: unknown, msg: string) => {
     if (!ok) throw Error(msg);
   };
@@ -83,7 +88,7 @@ export function installStudy(
         const mock=initialStudy();mock.own={id:colleague,title:'模拟同事 A · 外出勘察后整理现场记录',nodes:[
           ['现场照片找不到对应点位','照片和路线分开保存，事后难以对应。'],['语音记录夹杂噪声','现场口述的关键决定难以定位。'],['新旧平面图混用','手机中存在多版图纸，引用时容易选错。'],['报告材料遗漏','照片、批注和录音散落在不同应用。']
         ].map(([title,definition],i)=>({id:'mock-'+i,title,definition,background:'同事在现场用手机采集资料，回程需要交付勘察报告。',materials:['现场记录']}))};
-        mock.target=p.id;mock.step=reviewScene?5:4;
+        mock.target=p.id;mock.step=reviewScene?5:4;mock.peerModified=true;
         mock.peer=(reviewScene?.nodes||[]).map((n,i)=>({id:'reply-'+n.id,node:n.id,kind:'交互',text:['按住材料并拖到对应任务位置，松手前预览绑定结果。','框选需要处理的局部，在选区旁添加批注。','并排显示两个版本，点选差异并确认保留项。','把待核验材料逐项勾选，再生成交付清单。'][i%4],io:(n.materials.join('、')||n.title)+'，形成可确认的操作记录',links:[]}));
         if(reviewScene?.nodes[0])mock.peer.push({id:'ai-reply',node:reviewScene.nodes[0].id,kind:'AI',text:'读取所选材料，提取时间与主题，列出候选对应关系供确认。',io:'根据所选材料生成候选对应关系',links:[mock.peer[0].id]});
         rows.push({id:colleague,s:mock});
@@ -91,7 +96,8 @@ export function installStudy(
         mockB.own={id:colleagueB,title:'模拟同事 B · 家庭健康数据与临时行程管理',nodes:[
           ['餐盘内容混在一起','一张照片中包含主食、配菜和酱汁，难以分别记录。'],['分量描述不准确','用“一小碗”或“一拳”描述食物，结果总是偏差很大。'],['计划跟不上变化','临时加班后原定运动和晚餐计划仍按旧时间提醒。'],['家人记录混入','多人共用设备时，健康数据与饮食照片容易归错人。']
         ].map(([title,definition],i)=>({id:'mock-b-'+i,title,definition,background:'同事希望用手机照片、手表数据和日程记录管理全家的健康计划。',materials:['餐盘照片','健康数据','日程表']}))};
-        mockB.step=4;
+        mockB.target=p.id;mockB.step=reviewScene?5:4;mockB.peerModified=false;
+        mockB.peer=(reviewScene?.nodes||[]).map((n,i)=>({id:'reply-b-'+n.id,node:n.id,kind:i===0?'AI':'交互',text:['根据内容来源自动整理待确认的材料清单。','在时间线上拖动记录，调整它们与困难节点的对应关系。','长按两个版本进入并排比较，逐项确认保留内容。','提交前按困难节点检查材料和操作是否完整。'][i%4],io:'保留用户确认步骤，并显示当前处理状态',links:[]}));
         rows.push({id:colleagueB,s:mockB});
       }
       const target = () => rows.find((r) => r.id === s.target)?.s.own;
@@ -174,7 +180,10 @@ export function installStudy(
                 );
             }
             if (s.step === 3) s.practice = a;
-            else s.peer = a;
+            else {
+              s.peer = a;
+              if (b.modified === true) s.peerModified = true;
+            }
             if (b.action === "submit") {
               check(
                 src!.nodes.every((n) => a.some((c) => answerAt(c, n.id))),
@@ -200,6 +209,7 @@ export function installStudy(
             check(rows.some((r) => r.id === b.id && r.s.own), "这个场景暂时不可用");
             s.target = b.id;
             s.peer = [];
+            s.peerModified = false;
             break;
           case "review":
           case "complete": {
@@ -251,7 +261,7 @@ export function installStudy(
         own: s.own || scene(),
         target: target() || null,
         library: library(),
-        incoming: incoming.map((r) => ({ id: r.id, answers: r.s.peer, sample: simulation && r.id === colleague })),
+        incoming: incoming.map((r) => ({ id: r.id, answers: r.s.peer, sample: simulation, modified: Boolean(r.s.peerModified) })),
       });
     } catch (e) {
       db.exec("ROLLBACK");

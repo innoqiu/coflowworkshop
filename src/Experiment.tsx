@@ -8,7 +8,7 @@ type Packet = {
   own: Scene;
   target: Scene | null;
   library: Scene[];
-  incoming: { id: string; answers: Answer[]; sample?: boolean }[];
+  incoming: { id: string; answers: Answer[]; sample?: boolean; modified: boolean }[];
 };
 const labels = ["查看我已发布的场景", "预设场景练习", "选择别人场景"];
 export function Experiment({ refine }: { refine: () => void }) {
@@ -19,7 +19,8 @@ export function Experiment({ refine }: { refine: () => void }) {
     [busy, B] = useState(false),
     [edit, D] = useState<Answer | null>(null),
     [help, H] = useState(false),
-    [practicePrompt,setPracticePrompt]=useState(false);
+    [practicePrompt,setPracticePrompt]=useState(false),
+    [reviewing,setReviewing]=useState("");
   const [positions,setPositions]=useState<Record<string,number>>({});
   const lock = useRef(false);
   const active = (step: number) =>
@@ -103,8 +104,9 @@ export function Experiment({ refine }: { refine: () => void }) {
       template,
     });
   }
-  function persist(list: Answer[]) {
+  function persist(list: Answer[], modified = false) {
     return request("answers", {
+      modified,
       answers: list.map((c) => ({
         ...c,
         links: c.links.filter((id) =>
@@ -117,6 +119,13 @@ export function Experiment({ refine }: { refine: () => void }) {
   }
   const position=positions[String(tab)]||0;
   const node=scene?.nodes[position];
+  const selectedSubmission=incoming.find(item=>item.id===reviewing)||null;
+  const reviewStage=tab===0&&(step===5||step===6);
+  const completedReviews=(submission:Packet["incoming"][number])=>own.nodes.filter(n=>{
+    const value=s.reviews[submission.id+"/"+n.id];
+    return typeof value?.score==="number"&&Boolean(value.comment.trim());
+  }).length;
+  const allReviewsComplete=incoming.length>0&&incoming.every(item=>completedReviews(item)===own.nodes.length);
   function place(id:string,kind:Answer['kind']){
     if(!solving||!node||busy)return;
     const existing=answers.find(a=>a.id===id);
@@ -141,13 +150,13 @@ export function Experiment({ refine }: { refine: () => void }) {
   }
   return (
     <main className="study">
-      <nav>{solo?<><a href="/">退出单人测试</a><button onClick={restartSolo}>重新开始</button></>:<a href="/solo">单人测试</a>}
+      <nav>{solo&&<><a href="/">退出单人测试</a><button onClick={restartSolo}>重新开始</button></>}
         {labels.map((l, i) => (
           <button
             key={l}
             aria-pressed={i === tab}
             disabled={i === 2 && !s.own}
-            onClick={() => T(i)}
+            onClick={() => {T(i);if(i===0)setReviewing("")}}
           >
             {l}
           </button>
@@ -155,12 +164,13 @@ export function Experiment({ refine }: { refine: () => void }) {
       </nav>
       {solving&&scene&&<aside className="solution-submit-floating"><span>{solvedNodes} / {scene.nodes.length} 个困难已有方案</span><button className="primary" disabled={busy||solvedNodes<scene.nodes.length} onClick={()=>request("submit",{answers})}>提交解法</button></aside>}
       {err && <p role="alert">{err}</p>}
-      {tab===1&&step===2 ? <ScenePicker busy={busy} start={id=>request('choose',{id})}/> : tab===2&&step===4&&!target ? (
+      {reviewStage&&incoming.length>0&&!selectedSubmission ? <SubmissionPicker scene={own} submissions={incoming} reviews={s.reviews} step={step} busy={busy} select={setReviewing} complete={()=>request("complete",{reviews:s.reviews})} canComplete={allReviewsComplete}/> : tab===1&&step===2 ? <ScenePicker busy={busy} start={id=>request('choose',{id})}/> : tab===2&&step===4&&!target ? (
         <PeerLibrary scenes={library} busy={busy} select={(id)=>request('select',{id})}/>
       ) : !scene ? (
         <p>场景库中还没有其他人发布的题目，页面会自动刷新。</p>
       ) : (
         <section key={tab + "-" + scene.id}>
+          {tab===0&&selectedSubmission&&<button className="review-back" onClick={()=>setReviewing("")}>返回方案列表</button>}
           <h1>{scene.title}</h1>
           {solving ? <SolutionCanvas scene={scene} answers={answers} position={position} setPosition={(next)=>setPositions({...positions,[tab]:next})} remaining={remaining} busy={busy} draft={draft} drop={drop} place={place} edit={(answer)=>D(answer)}/> : <div>
           {scene.nodes.map((n, i) => (
@@ -220,8 +230,8 @@ export function Experiment({ refine }: { refine: () => void }) {
                     )}
                   </div>
                 ))}
-              {tab === 0 &&
-                incoming.map((r) => (
+              {tab === 0 && selectedSubmission &&
+                [selectedSubmission].map((r) => (
                   <Review
                     key={r.id}
                     node={n.id}
@@ -255,18 +265,7 @@ export function Experiment({ refine }: { refine: () => void }) {
                 </button>
               </>
             )}
-            {step === 5 &&
-              tab === 0 &&
-              (incoming.length ? (
-                <button
-                  disabled={busy}
-                  onClick={() => request("complete", { reviews: s.reviews })}
-                >
-                  完成批阅
-                </button>
-              ) : (
-                <p>等待同伴提交解法，提交后可在这里批阅。</p>
-              ))}
+            {step === 5 && tab === 0 && !incoming.length && <p>等待同伴提交解法，提交后可在这里批阅。</p>}
             {step === 6 && tab === 0 && <strong>实验已完成</strong>}
           </div>
         </section>
@@ -314,7 +313,7 @@ export function Experiment({ refine }: { refine: () => void }) {
                 await persist([
                   ...answers.filter((a) => a.id !== edit.id),
                   edit,
-                ])
+                ],answers.some((a)=>a.id===edit.id))
               )
                 D(null);
             }}
@@ -387,7 +386,7 @@ export function Experiment({ refine }: { refine: () => void }) {
                 <button
                   type="button"
                   onClick={async () => {
-                    if (await persist(answers.filter((a) => a.id !== edit.id)))
+                    if (await persist(answers.filter((a) => a.id !== edit.id),true))
                       D(null);
                   }}
                 >
@@ -400,6 +399,28 @@ export function Experiment({ refine }: { refine: () => void }) {
       )}
     </main>
   );
+}
+function SubmissionPicker({scene,submissions,reviews,step,busy,select,complete,canComplete}:{scene:Scene;submissions:Packet["incoming"];reviews:Record<string,Rating>;step:number;busy:boolean;select:(id:string)=>void;complete:()=>Promise<unknown>;canComplete:boolean}){
+  return <section className="submission-picker" aria-labelledby="submission-picker-title">
+    <header><small>RETURNED SOLUTIONS</small><h1 id="submission-picker-title">选择一份方案进行批阅</h1><p>你的场景共收到 {submissions.length} 份方案。先查看每份方案的概览，再选择一位参与者进入逐节点批阅。</p></header>
+    <div className="submission-grid">{submissions.map((submission,index)=>{
+      const done=scene.nodes.filter(node=>{const value=reviews[submission.id+"/"+node.id];return typeof value?.score==="number"&&Boolean(value.comment.trim())}).length;
+      const interactionCount=submission.answers.filter(answer=>answer.kind==="交互").length;
+      const aiCount=submission.answers.filter(answer=>answer.kind==="AI").length;
+      return <article className="submission-card" key={submission.id}>
+        <div className="submission-card-top"><small>{submission.sample?"单人测试示例":"返回方案"} {String(index+1).padStart(2,"0")}</small><span className={submission.modified?"modified":"original"}>{submission.modified?"经历过修改":"未经历修改"}</span></div>
+        <h2>参与者 {submission.id}</h2>
+        <p className="submission-counts">交互卡 {interactionCount} 张 · AI 卡 {aiCount} 张 · 已批阅 {done}/{scene.nodes.length}</p>
+        <ol>{scene.nodes.map((node,nodeIndex)=>{
+          const cards=submission.answers.filter(answer=>answerAt(answer,node.id));
+          return <li key={node.id}><span>{String(nodeIndex+1).padStart(2,"0")}</span><div><b>{node.title}</b><p>{cards.length?cards.map(card=>card.text).join("、"):"未提交该节点方案"}</p></div></li>
+        })}</ol>
+        <button className="primary" onClick={()=>select(submission.id)}>{step===6?"查看方案":"查看并批阅"}</button>
+      </article>
+    })}</div>
+    {step===5&&<div className="submission-complete"><p>{canComplete?"所有返回方案均已完成逐节点批阅。":"完成所有方案的评分与评语后，才能结束本轮批阅。"}</p><button className="primary" disabled={busy||!canComplete} onClick={()=>void complete()}>完成全部批阅</button></div>}
+    {step===6&&<strong className="submission-finished">实验已完成</strong>}
+  </section>
 }
 function PeerLibrary({scenes,busy,select}:{scenes:Scene[];busy:boolean;select:(id:string)=>Promise<unknown>}){
   return <section className="peer-library" aria-labelledby="peer-library-title"><header><small>COMMUNITY SCENES</small><h1 id="peer-library-title">选择一位同事的场景</h1><p>每张卡片都是一组已发布的考题。打开查看困难概览，再选择你想解决的场景。</p></header>

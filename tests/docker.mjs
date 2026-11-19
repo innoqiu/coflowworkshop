@@ -33,6 +33,8 @@ async function run() {
     "--detach",
     "--name",
     name,
+    "--env",
+    "EXPORT_TOKEN=docker-export-token-with-more-than-24-characters",
     "--publish",
     "127.0.0.1:3103:3000",
     "--mount",
